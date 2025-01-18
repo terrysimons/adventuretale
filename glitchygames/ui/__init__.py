@@ -1681,6 +1681,30 @@ class SliderSprite(BitmappySprite):
         # Set up appearance
         self.update_slider_appearance()
 
+        # Create the text sprite
+        text_x = x + width + 10
+        self.text_sprite = TextSprite(
+            x=text_x,
+            y=y - (height // 2),
+            width=32,
+            height=20,
+            text='0',
+            groups=groups,
+        )
+
+        # Set color based on slider name
+        if name == 'R':
+            self.color = (255, 0, 0)
+        elif name == 'G':
+            self.color = (0, 255, 0)
+        elif name == 'B':
+            self.color = (0, 0, 255)
+        else:
+            self.color = (128, 128, 128)
+
+        # Set up appearance
+        self.update_slider_appearance()
+
         # Make sure we update
         self.dirty = 2
         self.slider_knob.dirty = 2
@@ -1779,6 +1803,67 @@ class SliderSprite(BitmappySprite):
         self.slider_knob.update()
         self.text_sprite.update()
 
+    def update_color_well(self):
+        """Update the color well with current value."""
+        if hasattr(self.parent, 'color_well'):
+            if self.name == 'R':
+                self.parent.red_slider.value = self._value
+            elif self.name == 'G':
+                self.parent.green_slider.value = self._value
+            elif self.name == 'B':
+                self.parent.blue_slider.value = self._value
+
+            self.parent.color_well.active_color = (
+                self.parent.red_slider.value,
+                self.parent.green_slider.value,
+                self.parent.blue_slider.value,
+            )
+
+    def on_left_mouse_button_down_event(self, event):
+        mouse = MousePointer(pos=event.pos)
+        if pygame.sprite.collide_rect(mouse, self):
+            self.log.info(f"Mouse down on slider {self.name}")
+            self.dragging = True
+            # Update value based on click position
+            click_x = max(self.min_x, min(event.pos[0], self.max_x))
+            self._value = ((click_x - self.min_x) * 255) // (self.max_x - self.min_x)
+
+            # Create trigger event exactly like right-click does
+            trigger = pygame.event.Event(0, {'name': self.name, 'value': self._value})
+            if hasattr(self.parent, 'on_slider_event'):
+                self.log.info(f"Slider {self.name} calling on_slider_event with value {self._value}")
+                self.parent.on_slider_event(event=event, trigger=trigger)
+            else:
+                self.log.info(f"Parent {self.parent} has no on_slider_event")
+
+            self.value = self._value  # Update display after event
+
+    def on_mouse_motion_event(self, event):
+        if self.dragging:
+            self.log.info(f"Dragging slider {self.name}")
+            # Update value based on drag position
+            drag_x = max(self.min_x, min(event.pos[0], self.max_x))
+            self._value = ((drag_x - self.min_x) * 255) // (self.max_x - self.min_x)
+
+            # Create trigger event exactly like right-click does
+            trigger = pygame.event.Event(0, {'name': self.name, 'value': self._value})
+            if hasattr(self.parent, 'on_slider_event'):
+                self.log.info(f"Slider {self.name} calling on_slider_event with value {self._value}")
+                self.parent.on_slider_event(event=event, trigger=trigger)
+            else:
+                self.log.info(f"Parent {self.parent} has no on_slider_event")
+
+            self.value = self._value  # Update display after event
+
+    def on_left_mouse_button_up_event(self, event):
+        if self.dragging:
+            self.log.info(f"Mouse up on slider {self.name}")
+            self.dragging = False
+
+    def update(self):
+        super().update()
+        self.slider_knob.update()
+        self.text_sprite.update()
 
 class ColorWellSprite(BitmappySprite):
     """A color well sprite class."""
@@ -2143,6 +2228,284 @@ class InputDialog(BitmappySprite):
         """Handle key down events."""
         if event.key == pygame.K_TAB:
             self.input_box.activate()
+        else:
+            self.input_box.on_key_down_event(event)
+
+
+class MultiLineTextBox(BitmappySprite):
+    """A multi-line text box sprite class."""
+
+    log = LOG
+
+    def __init__(
+        self: Self,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        name: str | None = None,
+        text: str = '',
+        parent: object | None = None,
+        groups: pygame.sprite.LayeredDirty | None = None,
+    ) -> None:
+        """Initialize a MultiLineTextBox."""
+        if groups is None:
+            groups = pygame.sprite.LayeredDirty()
+
+        self.log.debug(f"Creating MultiLineTextBox: name={name}, pos=({x}, {y}), size=({width}, {height})")
+
+        super().__init__(
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            name=name,
+            parent=parent,
+            groups=groups,
+            focusable=True
+        )
+
+        self._text = text
+        self.text = text
+        self.active = False
+        self.cursor_visible = True
+        self.cursor_blink_time = pygame.time.get_ticks()
+        self.cursor_blink_rate = 530
+        self.cursor_pos = len(text)
+        self._last_update_time = pygame.time.get_ticks()
+        self._frame_count = 0
+
+        # Initialize selection attributes
+        self.selection_start = None
+        self.selection_end = None
+
+        # Force continuous updates
+        self.dirty = 2
+
+        self.image = pygame.Surface((width, height), pygame.SRCALPHA)
+        self.image = self.image.convert_alpha()
+
+        self.font = pygame.font.Font(None, 24)
+        self.text_color = WHITE
+        self.cursor_color = WHITE
+
+        # Add scroll tracking
+        self.scroll_offset = 0
+        self.visible_lines = self.height // self.font.get_linesize()
+
+    def update(self) -> None:
+        """Update the multi-line text box."""
+        self._frame_count += 1
+        current_time = pygame.time.get_ticks()
+        time_since_last_update = current_time - self._last_update_time
+        line_height = self.font.get_linesize()
+
+        self.log.debug(f"\n--- Frame {self._frame_count} ---")
+        self.log.debug(f"Update called after {time_since_last_update}ms")
+        self.log.debug(f"State: active={self.active}, cursor_visible={self.cursor_visible}")
+        self.log.debug(f"Dirty flag: {self.dirty}")
+
+        self._last_update_time = current_time
+
+        # Clear background
+        self.image.fill((32, 32, 32, 200))
+
+        # Draw border
+        if self.active:
+            pygame.draw.rect(self.image, (64, 64, 255), (0, 0, self.width, self.height), 1)
+        else:
+            pygame.draw.rect(self.image, WHITE, (0, 0, self.width, self.height), 1)
+
+        # Render text with line breaks and scrolling
+        if self._text:
+            lines = self._text.split('\n')
+            total_lines = len(lines)
+
+            # Adjust scroll if needed to keep cursor visible
+            cursor_line = self._text[:self.cursor_pos].count('\n')
+            if cursor_line - self.scroll_offset >= self.visible_lines:
+                self.scroll_offset = cursor_line - self.visible_lines + 1
+            elif cursor_line < self.scroll_offset:
+                self.scroll_offset = cursor_line
+
+            # Render visible lines
+            visible_range = slice(self.scroll_offset, self.scroll_offset + self.visible_lines)
+            visible_lines = lines[visible_range]
+
+            y_offset = 5
+            for line in visible_lines:
+                if line:  # Only render non-empty lines
+                    text_surface = self.font.render(line, True, self.text_color)
+                    self.image.blit(text_surface, (5, y_offset))
+                y_offset += line_height
+
+        # Handle cursor blinking
+        if self.active:
+            time_since_blink = current_time - self.cursor_blink_time
+            if time_since_blink >= self.cursor_blink_rate:
+                self.cursor_visible = not self.cursor_visible
+                self.cursor_blink_time = current_time
+
+            if self.cursor_visible:
+                # Count newlines before cursor to determine y position
+                lines_before_cursor = self._text[:self.cursor_pos].count('\n')
+                # Only draw cursor if it's in the visible range
+                if self.scroll_offset <= lines_before_cursor < self.scroll_offset + self.visible_lines:
+                    # Get text width of current line up to cursor
+                    current_line_start = self._text[:self.cursor_pos].rindex('\n') + 1 if '\n' in self._text[:self.cursor_pos] else 0
+                    current_line_text = self._text[current_line_start:self.cursor_pos]
+                    text_width = self.font.size(current_line_text)[0]
+
+                    cursor_x = text_width + 5
+                    cursor_y = 5 + ((lines_before_cursor - self.scroll_offset) * line_height)
+
+                    pygame.draw.line(
+                        self.image,
+                        self.cursor_color,
+                        (cursor_x, cursor_y),
+                        (cursor_x, cursor_y + 20),
+                        2
+                    )
+
+        # Force continuous updates
+        self.dirty = 2
+
+    def on_left_mouse_button_down_event(self, event: pygame.event.Event) -> None:
+        """Handle left mouse button down events."""
+        self.log.debug(f"\n--- Mouse Event ---")
+        self.log.debug(f"Mouse down at {event.pos}")
+        self.log.debug(f"Current rect: {self.rect}")
+        self.log.debug(f"Current state: active={self.active}, cursor_visible={self.cursor_visible}")
+
+        if self.rect.collidepoint(event.pos):
+            self.active = True
+            self.cursor_visible = True
+            self.cursor_blink_time = pygame.time.get_ticks()
+            pygame.key.start_text_input()
+            # Enable key repeat for backspace
+            pygame.key.set_repeat(500, 50)  # 500ms delay, 50ms interval
+
+            # Calculate cursor position
+            x_rel = event.pos[0] - self.rect.x - 5
+            text_width = 0
+            for i, char in enumerate(self._text):
+                char_width = self.font.size(char)[0]
+                if text_width + (char_width / 2) > x_rel:
+                    self.cursor_pos = i
+                    break
+                text_width += char_width
+            else:
+                self.cursor_pos = len(self._text)
+
+            self.log.debug(f"Activated: cursor_pos={self.cursor_pos}")
+            self.log.debug(f"Text input started")
+            self.dirty = 2
+        else:
+            self.active = False
+            pygame.key.stop_text_input()
+            # Disable key repeat when inactive
+            pygame.key.set_repeat()  # Calling with no args disables repeat
+            self.log.debug("Deactivated, text input stopped")
+
+    def on_key_down_event(self, event: pygame.event.Event) -> None:
+        """Handle key down events."""
+        if not self.active:
+            return
+
+        mods = pygame.key.get_mods()
+        is_paste = (event.key == pygame.K_v and
+                    ((mods & pygame.KMOD_CTRL) or (mods & pygame.KMOD_META)))
+        is_copy = (event.key == pygame.K_c and
+                   ((mods & pygame.KMOD_CTRL) or (mods & pygame.KMOD_META)))
+        is_shift = bool(mods & pygame.KMOD_SHIFT)
+        is_ctrl = bool(mods & pygame.KMOD_CTRL) or bool(mods & pygame.KMOD_META)
+
+        # Handle Ctrl+Enter for submission
+        if event.key == pygame.K_RETURN and is_ctrl:
+            if self.parent and hasattr(self.parent, 'on_text_submit_event'):
+                self.parent.on_text_submit_event(self._text)
+                # Deactivate the text box after submission
+                self.active = False
+                pygame.key.stop_text_input()
+                pygame.key.set_repeat()  # Disable key repeat
+                self.log.debug("Deactivated after submission")
+            return
+
+        # Handle selection with shift+arrow keys
+        if event.key in (pygame.K_LEFT, pygame.K_RIGHT):
+            if is_shift:
+                if self.selection_start is None:
+                    self.selection_start = self.cursor_pos
+
+                if event.key == pygame.K_LEFT:
+                    self.cursor_pos = max(0, self.cursor_pos - 1)
+                else:
+                    self.cursor_pos = min(len(self._text), self.cursor_pos + 1)
+                self.selection_end = self.cursor_pos
+                return
+            else:
+                self.selection_start = None
+                self.selection_end = None
+
+        # Handle copy/paste
+        if is_copy and self._text:
+            try:
+                import pyperclip
+                if self.selection_start is not None and self.selection_end is not None:
+                    start = min(self.selection_start, self.selection_end)
+                    end = max(self.selection_start, self.selection_end)
+                    selected_text = self._text[start:end]
+                    pyperclip.copy(selected_text)
+                else:
+                    pyperclip.copy(self._text)
+            except Exception as e:
+                self.log.error(f"Error copying text: {e}")
+            return
+        elif is_paste:
+            try:
+                import pyperclip
+                clipboard_text = pyperclip.paste()
+                if clipboard_text:
+                    before_cursor = self._text[:self.cursor_pos]
+                    after_cursor = self._text[self.cursor_pos:]
+                    self._text = before_cursor + clipboard_text + after_cursor
+                    self.cursor_pos += len(clipboard_text)
+                    self.text = self._text
+            except Exception as e:
+                self.log.error(f"Error pasting text: {e}")
+            return
+
+        # Handle regular key events
+        if event.key == pygame.K_RETURN:
+            # Handle newline
+            before_cursor = self._text[:self.cursor_pos]
+            after_cursor = self._text[self.cursor_pos:]
+            self._text = before_cursor + '\n' + after_cursor
+            self.cursor_pos += 1
+            self.text = self._text
+        elif event.key == pygame.K_BACKSPACE:
+            if self.cursor_pos > 0:
+                self._text = self._text[:self.cursor_pos-1] + self._text[self.cursor_pos:]
+                self.cursor_pos -= 1
+                self.text = self._text
+        elif event.key == pygame.K_DELETE:
+            if self.cursor_pos < len(self._text):
+                self._text = self._text[:self.cursor_pos] + self._text[self.cursor_pos+1:]
+                self.text = self._text
+        elif event.key == pygame.K_LEFT:
+            self.cursor_pos = max(0, self.cursor_pos - 1)
+        elif event.key == pygame.K_RIGHT:
+            self.cursor_pos = min(len(self._text), self.cursor_pos + 1)
+        elif event.unicode and event.unicode >= ' ':
+            before_cursor = self._text[:self.cursor_pos]
+            after_cursor = self._text[self.cursor_pos:]
+            self._text = before_cursor + event.unicode + after_cursor
+            self.cursor_pos += 1
+            self.text = self._text
+
+        self.cursor_visible = True
+        self.cursor_blink_time = pygame.time.get_ticks()
+        self.dirty = 1
         else:
             self.input_box.on_key_down_event(event)
 

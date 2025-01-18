@@ -333,6 +333,34 @@ class SceneManager(SceneInterface, events.EventManager):
         else:
             raise AttributeError(f"'{type(self)}' object has no attribute '{attr}'")
 
+    def handle_event(self, event: events.HashableEvent) -> None:
+        """Handle pygame events.
+
+        Args:
+            event (pygame.event.Event): The event to handle.
+
+        Returns:
+            None
+        """
+        # Check for focused sprites first
+        if self.active_scene and self.active_scene.all_sprites:
+            focused_sprites = [sprite for sprite in self.active_scene.all_sprites
+                             if hasattr(sprite, 'active') and sprite.active]
+
+            if focused_sprites and event.type == pygame.KEYDOWN:
+                # Let the active scene handle it directly
+                self.active_scene.handle_event(event)
+                return
+
+        # Only process other events if no focused sprites handled it
+        if event.type == pygame.QUIT:
+            self.log.info("POSTING QUIT EVENT")
+            self.quit_requested = True
+        else:
+            # Pass to active scene if we have one
+            if self.active_scene:
+                self.active_scene.handle_event(event)
+
 
 class Scene(SceneInterface, SpriteInterface, events.AllEventStubs):
     """Scene object base class.
@@ -819,7 +847,7 @@ class Scene(SceneInterface, SpriteInterface, events.AllEventStubs):
     #     """
     #     self.log.debug(f'{type(self)}: On Key Down Event {event}')
 
-    def on_key_up_event(self: Self, event: events.HashableEvent) -> None:
+    def on_key_up_event(self, event: events.HashableEvent) -> None:
         """Handle key up events.
 
         Args:
@@ -830,12 +858,16 @@ class Scene(SceneInterface, SpriteInterface, events.AllEventStubs):
         """
         self.log.debug(f'{type(self)}: On Key Up Event {event}')
 
-        # Wire up quit by default for escape and q.
-        #
-        # If a game implements on_key_up_event themselves
-        # they'll have to map their quit keys or call super().on_key_up_event()
-        if event.key in {pygame.K_q, pygame.K_ESCAPE}:
-            self.scene_manager.quit_game()
+        # Check for focused sprites first
+        focused_sprites = [sprite for sprite in self.all_sprites
+                          if hasattr(sprite, 'active') and sprite.active]
+
+        # Only process quit keys if no sprites are focused
+        if not focused_sprites:
+            if event.key in {pygame.K_q, pygame.K_ESCAPE}:
+                self.log.info("Quit requested")
+                # Post a QUIT event to ensure proper cleanup
+                pygame.event.post(pygame.event.Event(pygame.QUIT))
 
     # def on_key_chord_down_event(self: Self, event: events.HashableEvent, keys_down: list) -> None:
     #     """Handle key chord down events.
@@ -874,16 +906,42 @@ class Scene(SceneInterface, SpriteInterface, events.AllEventStubs):
         # MENUITEM         menu, item
         self.log.debug(f'{type(self)}: On Menu Item Event {event}')
 
-    # def on_mouse_button_down_event(self: Self, event: events.HashableEvent) -> None:
-    #     """Handle mouse button down events.
+    def on_mouse_button_down_event(self: Self, event: events.HashableEvent) -> None:
+        """Handle mouse button down events.
 
-    #     Args:
-    #         event (pygame.event.Event): The event to handle.
+        Args:
+            event (pygame.event.Event): The event to handle.
 
-    #     Returns:
-    #         None
-    #     """
-    #     self.log.debug(f'{type(self)}: On Mouse Button Down Event {event}')
+        Returns:
+            None
+        """
+        self.log.debug(f"=== Scene: Mouse Button Down ===")
+        self.log.debug(f"Click position: {event.pos}")
+
+        # Get sprites at click position
+        collided_sprites = self.sprites_at_position(pos=event.pos)
+        self.log.debug(f"Collided sprites: {[type(s).__name__ for s in collided_sprites]}")
+        self.log.debug(f"Focusable sprites: {[s for s in collided_sprites if hasattr(s, 'focusable') and s.focusable]}")
+
+        # Find currently focused sprites
+        focused_sprites = [sprite for sprite in self.all_sprites
+                          if hasattr(sprite, 'active') and sprite.active]
+        self.log.debug(f"Currently focused sprites: {[type(s).__name__ for s in focused_sprites]}")
+
+        # If we clicked outside all sprites that can be focused, unfocus them
+        if not any(hasattr(sprite, 'focusable') and sprite.focusable for sprite in collided_sprites):
+            self.log.debug("Click outside focusable sprites - unfocusing")
+            for sprite in focused_sprites:
+                if hasattr(sprite, 'active'):
+                    self.log.debug(f"Unfocusing {type(sprite).__name__}")
+                    sprite.active = False
+                    if hasattr(sprite, 'on_focus_lost'):
+                        sprite.on_focus_lost()
+
+        # Process the click for collided sprites
+        for sprite in collided_sprites:
+            if hasattr(sprite, 'on_mouse_button_down_event'):
+                sprite.on_mouse_button_down_event(event)
 
     # def on_mouse_button_up_event(self: Self, event: events.HashableEvent) -> None:
     #     """Handle mouse button up events.
@@ -1100,17 +1158,33 @@ class Scene(SceneInterface, SpriteInterface, events.AllEventStubs):
         Returns:
             None
         """
-        # MOUSEBUTTONDOWN  pos, button
-        self.log.debug(f'{type(self)}: Left Mouse Button Down Event: {event}')
+        self.log.debug("=== Scene: Left Mouse Button Down ===")
+        self.log.debug(f"Click position: {event.pos}")
 
+        # Get sprites at click position
         collided_sprites = self.sprites_at_position(pos=event.pos)
+        self.log.debug(f"Collided sprites: {[type(s).__name__ for s in collided_sprites]}")
+        self.log.debug(f"Focusable sprites: {[s for s in collided_sprites if hasattr(s, 'focusable') and s.focusable]}")
 
-        self.log.info(f'ENGINE SPRITES: {collided_sprites}')
+        # Find currently focused sprites
+        focused_sprites = [sprite for sprite in self.all_sprites
+                          if hasattr(sprite, 'active') and sprite.active]
+        self.log.debug(f"Currently focused sprites: {[type(s).__name__ for s in focused_sprites]}")
 
-        # if collided_sprites:
-        #     collided_sprites[0].on_left_mouse_button_down_event(event)
+        # If we clicked outside all sprites that can be focused, unfocus them
+        if not any(hasattr(sprite, 'focusable') and sprite.focusable for sprite in collided_sprites):
+            self.log.debug("Click outside focusable sprites - unfocusing")
+            for sprite in focused_sprites:
+                if hasattr(sprite, 'active'):
+                    self.log.debug(f"Unfocusing {type(sprite).__name__}")
+                    sprite.active = False
+                    if hasattr(sprite, 'on_focus_lost'):
+                        sprite.on_focus_lost()
+
+        # Process the click for collided sprites
         for sprite in collided_sprites:
-            sprite.on_left_mouse_button_down_event(event)
+            if hasattr(sprite, 'on_left_mouse_button_down_event'):
+                sprite.on_left_mouse_button_down_event(event)
 
     def on_middle_mouse_button_down_event(self: Self, event: events.HashableEvent) -> None:
         """Handle middle mouse button down events.
@@ -1568,3 +1642,33 @@ class Scene(SceneInterface, SpriteInterface, events.AllEventStubs):
             None
         """
         self.log.debug(f'Implement load_resource() in {type(self)}.')
+
+    def on_key_down_event(self, event: events.HashableEvent) -> None:
+        """Handle key down events."""
+        self.log.debug(f'{type(self)}: On Key Down Event {event}')
+
+        # Find the currently focused sprite
+        focused_sprites = [sprite for sprite in self.all_sprites if hasattr(sprite, 'active') and sprite.active]
+
+        if focused_sprites:
+            # If we have focused sprites, only they get the events
+            for sprite in focused_sprites:
+                if hasattr(sprite, 'on_key_down_event'):
+                    sprite.on_key_down_event(event)
+                    return  # Stop event propagation after handling
+
+        # Only process scene-level key events if no focused sprite handled it
+        if event.key == pygame.K_q:
+            self.log.info("Quit requested")
+            self.quit_requested = True
+
+    def on_text_submit_event(self, text: str) -> None:
+        """Handle text submission from MultiLineTextBox.
+
+        Args:
+            text (str): The submitted text.
+
+        Returns:
+            None
+        """
+        self.log.info(f"Text submitted: '{text}'")
